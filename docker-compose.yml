@@ -1,7 +1,31 @@
 version: "3.9"
 
 services:
-  # TODO add traefik to handle reverse proxy and SSL
+  # Reverse proxy (Traefik) with HTTPS and HTTP→HTTPS redirects
+  traefik:
+    image: traefik:v2.11
+    command:
+      - --providers.docker=true
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.letsencrypt.acme.email=${LETSENCRYPT_EMAIL}
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge=true
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+    volumes:
+      - ${CONTAINER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock:ro
+      - letsencrypt-data:/letsencrypt
+    labels:
+      - "traefik.enable=true"
+      # Global HTTP→HTTPS redirect
+      - "traefik.http.routers.http-catchall.rule=HostRegexp(`{host:.+}`)"
+      - "traefik.http.routers.http-catchall.entrypoints=web"
+      - "traefik.http.routers.http-catchall.middlewares=redirect-to-https"
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
 
   db:
     image: postgres:16-alpine
@@ -10,7 +34,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-maphub}
     volumes:
-      - dbdata:/var/lib/postgresql/data
+      - db-data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     healthcheck:
@@ -37,22 +61,14 @@ services:
       retries: 5
       timeout: 5s
 
-  # TODO remove firebase
   api:
-    build:
-      context: ../maphub-api
-      dockerfile: Dockerfile
-    volumes: # TODO to be removed
-      - ../maphub-api/firebase-adminsdk.json:/app/firebase-adminsdk.json
-    command: [ "sh", "-c", "alembic upgrade head && hypercorn app:app --bind 0.0.0.0:${PORT} --worker-class asyncio" ] # TODO increase --workers $(($(nproc) * 2 + 1))
+    image: noxdecima/maphub-api:latest
+    command: [ "sh", "-c", "alembic upgrade head && hypercorn app:app --bind 0.0.0.0:8000 --worker-class asyncio --workers 2" ]
     environment:
-      FIREBASE_ADMIN_SDK_FILE: firebase-adminsdk.json # TODO to be removed
-
-      PORT: 8000
       ALLOWED_ORIGINS: "*"
-      API_URL: ${API_HOST}
-      FRONT_END_URL: ${FRONT_HOST}
-      STAGE: production
+      API_URL: https://${API_DOMAIN}
+      FRONT_END_URL: https://${FRONT_DOMAIN}
+      STAGE: local
 
       # Database
       DB_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-maphub}
@@ -68,10 +84,11 @@ services:
       # Stripe (live|disabled)
       STRIPE_MODE: disabled
 
-#      # Auth (Keycloak)
-#      AUTH_HOST: ${AUTH_HOST}
-#      KEYCLOAK_REALM: ${KEYCLOAK_REALM}
-#      KEYCLOAK_ISSUER: http://${AUTH_HOST}/realms/${KEYCLOAK_REALM}
+      # Keycloak
+      AUTH_PROVIDER: keycloak
+      AUTH_HOST: https://${AUTH_DOMAIN}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-maphub}
+      KEYCLOAK_ISSUER: https://${AUTH_DOMAIN}/realms/${KEYCLOAK_REALM:-maphub}
 
       # SMTP for API (optional)
       MAIL_SERVER: ${MAIL_SERVER}
@@ -81,52 +98,92 @@ services:
       MAIL_FROM: ${MAIL_FROM:-notifications@maphub.local}
       MAIL_FROM_NAME: ${MAIL_FROM_NAME:-MapHub Notifications}
 
-    ports:
-      - "8000:8000"
-        
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api.rule=Host(`${API_DOMAIN}`)"
+      - "traefik.http.routers.api.entrypoints=websecure"
+      - "traefik.http.routers.api.tls=true"
+      - "traefik.http.routers.api.tls.certresolver=letsencrypt"
+      - "traefik.http.services.api.loadbalancer.server.port=8000"
+
     healthcheck:
       test: [ "CMD-SHELL", "curl -f http://localhost:8000/docs || exit 1" ]
-      interval: 30s
+      interval: 10s
       timeout: 10s
-      retries: 3
-      start_period: 40s
+      retries: 10
 
     depends_on:
       db:
         condition: service_healthy
       minio:
         condition: service_healthy
+      keycloak:
+        condition: service_healthy
 
-
-  # TODO set up env vars
-  # TODO make work with new auth service
-  # TODO adjust dockerfile to not expose env file
-  # TODO disable mixpanel and other services
   front:
-    build:
-      context: ../maphub-website
-      dockerfile: Dockerfile
+    image: noxdecima/maphub-front:latest
     environment:
-      # NextAuth + Keycloak
-      NEXTAUTH_URL: ${FRONT_HOST}
-      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
-      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID}
-      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:-}
-      KEYCLOAK_REALM: ${KEYCLOAK_REALM}
-      AUTH_HOST: ${AUTH_HOST}
-      # App API base
-      API_URL: ${API_HOST}
-      # Optional Google envs (if using Google IdP via Keycloak later)
-      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
-      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      # GENERAL
+      NEXT_PUBLIC_ENV: production
+      NEXT_PUBLIC_BASE_URL: https://${FRONT_DOMAIN}
+
+      # MAPBOX
+      NEXT_PUBLIC_MAPBOX_TOKEN: ${MAPBOX_TOKEN}
+
+      # MAPHUB
+      NEXT_PUBLIC_MAPHUB_API_URL: https://${API_DOMAIN}
+
+      # AUTH
+      NEXT_PUBLIC_AUTH_PROVIDER: keycloak
+      NEXTAUTH_URL: https://${FRONT_DOMAIN}
+      KEYCLOAK_HOST: https://${AUTH_DOMAIN}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-maphub}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-maphub-frontend}
+      NEXTAUTH_SECRET: ${FRONT_AUTH_SECRET}
 
     depends_on:
       api:
         condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.front.rule=Host(`${FRONT_DOMAIN}`)"
+      - "traefik.http.routers.front.entrypoints=websecure"
+      - "traefik.http.routers.front.tls=true"
+      - "traefik.http.routers.front.tls.certresolver=letsencrypt"
+      - "traefik.http.services.front.loadbalancer.server.port=3000"
 
-    ports:
-      - "3000:3000"
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    command: [ "start", "--import-realm" ]
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_HTTP_PORT: 8080
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY: edge
+      KC_PROXY_HEADERS: xforwarded
+      KC_HOSTNAME_URL: https://${AUTH_DOMAIN}
+      KC_HOSTNAME_STRICT: "false"
+    volumes:
+      - keycloak-data:/opt/keycloak/data
+      - ./keycloak/realm-maphub.generated.json:/opt/keycloak/data/import/import.json:ro
+    healthcheck:
+      test: [ "CMD-SHELL", "timeout 2 bash -lc '</dev/tcp/localhost/8080'" ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.keycloak.rule=Host(`${AUTH_DOMAIN}`)"
+      - "traefik.http.routers.keycloak.entrypoints=websecure"
+      - "traefik.http.routers.keycloak.tls=true"
+      - "traefik.http.routers.keycloak.tls.certresolver=letsencrypt"
+      - "traefik.http.services.keycloak.loadbalancer.server.port=8080"
 
 volumes:
-  dbdata:
+  db-data:
   minio-data:
+  keycloak-data:
+  letsencrypt-data:
