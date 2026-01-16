@@ -73,12 +73,12 @@ Notes
 ---
 
 ### Container sources
+- MapHub API image (`noxdecima/maphub-api`): https://hub.docker.com/r/noxdecima/maphub-api
+- MapHub Front image (`noxdecima/maphub-front`): https://hub.docker.com/r/noxdecima/maphub-front
 - Traefik v2.11: https://hub.docker.com/_/traefik • Docs: https://doc.traefik.io/traefik/
 - Postgres 16-alpine: https://hub.docker.com/_/postgres
 - MinIO: https://hub.docker.com/r/minio/minio • Source: https://github.com/minio/minio
 - Keycloak 25: https://quay.io/repository/keycloak/keycloak • Source: https://github.com/keycloak/keycloak
-- MapHub API image (`noxdecima/maphub-api`): https://hub.docker.com/r/noxdecima/maphub-api
-- MapHub Front image (`noxdecima/maphub-front`): https://hub.docker.com/r/noxdecima/maphub-front
 
 ---
 
